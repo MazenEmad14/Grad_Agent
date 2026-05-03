@@ -1,0 +1,30 @@
+# ══════════════════════════════════════════════════════════════════
+#  Hematology AI Agent — Python Dependencies
+#  Install:  pip install -r requirements.txt
+# ══════════════════════════════════════════════════════════════════
+
+# ── LangGraph / LangChain (AI pipeline) ───────────────────────────
+langgraph>=0.2.0
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+
+# ── Google Gemini (LLM + Vision) ──────────────────────────────────
+google-genai>=1.0.0              # from google import genai
+
+# ── FastAPI server ─────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9          # required for file uploads
+
+# ── ML / Image processing ─────────────────────────────────────────
+torch>=2.2.0
+torchvision>=0.17.0
+Pillow>=10.0.0                   # PIL.Image
+numpy>=1.26.0
+joblib>=1.4.0                    # loading sklearn / custom models
+scikit-learn>=1.4.0
+pandas>=2.2.0
+
+# ── Environment & utilities ────────────────────────────────────────
+python-dotenv>=1.0.0             # load_dotenv
