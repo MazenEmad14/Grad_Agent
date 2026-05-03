@@ -1,0 +1,68 @@
+إضافات في قمة الذكاء! إنت كده بتحول النظام من مجرد "أداة ذكاء اصطناعي" لـ **نظام دعم قرار طبي حقيقي (Clinical Decision Support System - CDSS)** جاهز للإنتاج. 
+
+تفعيل الـ `confidence_threshold` ومراقبة جودة البيانات (`data_completeness`) بيحمي النظام من إنه يطلع تشخيصات "بثقة عمياء" لو الداتا ناقصة أو جودتها سيئة.
+
+إليك المنطق المُحسّن للعُقد (Nodes) والمسارات (Edges) بعد دمج هذه الإضافات وتفعيلها بشكل عملي:
+
+### المنطق المُحسّن للعُقد (The Refined Node Logic)
+
+**1. `validate_inputs_node` (عقدة التحقق من المدخلات):**
+* **الإجراء:** تفحص ما تم رفعه من المستخدم.
+* **تحديث الحالة:** تضبط `is_valid_input`. وتملأ قائمة `missing_modalities` بدقة (مثلاً: `['lab_data']` لو رفع صورة فقط، أو `['image']` لو رفع تحليل فقط). وتبدأ بتسجيل أول خطوة في `decision_trace` (مثلاً: "تم استلام المدخلات: صورة فقط").
+
+**2. `extract_and_standardize_node` (عقدة الاستخراج والتوحيد):**
+* **الإجراء:** تقوم بتشغيل الـ OCR أو توحيد الإدخال اليدوي.
+* **تفعيل المتغيرات:** تحسب `data_completeness` (مثلاً: لو الروشتة مقطوعة وقرأ 3 قيم من أصل 5، تكون النسبة `0.6`). لو النسبة ضعيفة، تضيف تحذير في `warnings` (مثلاً: "بيانات التحليل غير مكتملة").
+* **تجاوز ذكي:** إذا كانت `['lab_data']` في قائمة `missing_modalities`، تتجاوز هذه العقدة المعالجة وتمرر الحالة. وتسجل ذلك في `decision_trace`.
+
+**3. `binary_classifier_node` (المركز متعدد الوسائط - The Multimodal Hub):**
+* **الإجراء:** تمرر الداتا للموديل الأساسي وتستقبل التشخيص المبدئي.
+* **تفعيل المتغيرات:** تضبط `is_sick`. وتضبط `disease_confidence`. وتقارنها بـ `confidence_threshold` (مثلاً `0.6`). إذا كانت الثقة أقل، تضبط `low_confidence_flag = True` وتضيف تحذير في `warnings`. وتسجل الخطوة في `decision_trace`.
+
+**4. `disease_classifier_node` (عقدة مصنف المرض):**
+* **الإجراء:** تحدد المرض الدقيق (تعمل فقط إذا كان المريض مريضاً ولديه بيانات).
+* **تحديث الحالة:** تضبط `disease_type`، `disease_candidates`. وتقيّم أيضاً `disease_confidence` وتحدث `low_confidence_flag` لو التشخيص الدقيق ثقته ضعيفة. وتسجل في `decision_trace`.
+
+**5. `severity_assessor_node` (عقدة مقيم الخطورة):**
+* **الإجراء:** تُقيّم مستويات الخطر للمرض المصنف.
+* **تحديث الحالة:** تضبط `severity_level`، و `risk_level`. وتسجل في `decision_trace`.
+
+**6. `decision_node` (غرفة العمليات والقرار - The Logic Gate):**
+* **الإجراء:** هذه العقدة هي "العقل المدبر" للإجراءات النهائية. تنظر إلى كل الفيتشرز الجديدة:
+    * **التحاليل الإضافية:** إذا كانت `missing_modalities` تحتوي على `['lab_data']` والمريض طلع `is_sick == True`، تضبط `needs_additional_testing = True` وتضيف توصية بعمل فحص دم (CBC).
+    * **تدخل الطبيب:** إذا كان `low_confidence_flag == True` (الموديل مش متأكد)، أو `data_completeness < 0.7` (الداتا ناقصة جداً)، أو `severity_level` مرتفع، تقوم فوراً بضبط `requires_doctor = True` وتضيف تحذير طوارئ.
+* **تحديث الحالة:** تسجيل القرار النهائي في `decision_trace`.
+
+**7. `generate_report_node` (عقدة إنشاء التقرير):**
+* **الإجراء:** تجمع النص النهائي. تعرض الـ `warnings` بشكل بارز للمستخدم، وتصيغ التوصيات بناءً على `needs_additional_testing` و `requires_doctor` لتظهر في واجهة الموبايل بشكل واضح.
+
+---
+
+### المسارات (The Edges - The Flow)
+
+المسار يظل خطياً وأنيقاً، مع الاعتماد على الشروط لحماية الجراف.
+
+1. البداية (`START`) ➔ `validate_inputs_node`
+2. `validate_inputs_node` ➔ `extract_and_standardize_node`
+3. `extract_and_standardize_node` ➔ `binary_classifier_node`
+
+**التفرع الشرطي (بعد المصنف الثنائي - نقطة اتخاذ المسار):**
+
+هنا نستخدم (Conditional Edge) بناءً على مخرجات الموديل الأول:
+
+* **إذا `is_sick == False` (سليم):** اذهب مباشرة إلى ➔ `decision_node`. (لا حاجة لتشخيص شخص سليم).
+* **إذا `is_sick == True` (مريض) وكانت "lab_data" في قائمة `missing_modalities`:** اذهب مباشرة إلى ➔ `decision_node`. (لا يمكننا تحديد نوع المرض بدون أرقام؛ يجب أن نطلب منه التحليل أولاً).
+* **إذا `is_sick == True` (مريض) ولدينا `lab_data`:** أكمل المسار الطبيعي لـ ➔ `disease_classifier_node`.
+
+**استكمال المسار الطبيعي:**
+
+* `disease_classifier_node` ➔ `severity_assessor_node`
+* `severity_assessor_node` ➔ `decision_node`
+* `decision_node` ➔ `generate_report_node`
+* `generate_report_node` ➔ النهاية (`END`)
+
+---
+
+بهذا التصميم، المتغيرات الجديدة (`missing_modalities`، `data_completeness`، `low_confidence_flag`) لم تعد مجرد حبر على ورق، بل أصبحت **أدوات تحكم فعلية** تحمي المريض وتوجه واجهة المستخدم (Mobile App) لرد الفعل الصحيح.
+
+هل هذا التصور يرضي طموحك للمشروع؟ إذا كانت الإجابة نعم، فنحن جاهزون تماماً لكتابة كود الـ Nodes الفعلي.
