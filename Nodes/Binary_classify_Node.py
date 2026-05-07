@@ -168,11 +168,13 @@ class BinaryClassificationEngine:
 # =================================================================
 # Node Class
 # =================================================================
+# =================================================================
+# Node Class (مع إضافة صمامات الأمان الطبية والتوجيه الذكي)
+# =================================================================
 class BinaryClassifierNode:
     """
     Node 3: Determines whether the patient is sick or healthy.
-    Requires the BinaryClassificationEngine passed via LangGraph config:
-        config={"configurable": {"binary_engine": <engine_instance>}}
+    Requires the BinaryClassificationEngine passed via LangGraph config.
     """
 
     def __call__(self, state: dict, config: RunnableConfig) -> dict:
@@ -196,19 +198,66 @@ class BinaryClassifierNode:
             agent["errors"] = errors
             return {"agent_state": agent}
 
-        standardized_data = agent.get("standardized_data", {})
-        image_b64         = inp.get("blood_smear_image")
+        # قراءة البيانات من الـ State
+        input_type = inp.get("input_type", "unknown")
+        raw_standardized_data = agent.get("standardized_data", {})
+        
+        # 🧹 التنظيف العظيم: مسح الأصفار الوهمية بتاعة السواجر
+        clean_data = {k: v for k, v in raw_standardized_data.items() if v != 0 and v is not None}
+        
+        # 🛡️ الدرع الطبي: هل التحاليل الأساسية موجودة؟
+        # مينفعش نشغل الموديل الرقمي من غير التلاتة دول
+        core_features = ["HGB", "WBC", "PLT"]
+        has_core_data = all(feat in clean_data for feat in core_features)
 
-        has_tabular = bool(standardized_data)
-        has_image   = bool(image_b64)
-
+        # 🚨 التوجيه الذكي الحاسم 🚨
+        if input_type == "image_only" or not has_core_data:
+            print("⚠️ Core tabular data missing or image_only mode. Routing to Vision-Only!")
+            has_tabular = False
+            clean_data = {} # تصفير الداتا عشان الـ LLM والـ Engine ميتلخبطوش
+            agent["standardized_data"] = {} 
+        else:
+            has_tabular = True
+            agent["standardized_data"] = clean_data
+            
+        standardized_data = clean_data
+        image_b64 = inp.get("blood_smear_image")
+        has_image = bool(image_b64)
+            
         try:
+            # التوقع باستخدام الـ Engine
             prob, strategy = engine.predict(
                 tabular_data = standardized_data if has_tabular else None,
                 base64_image = image_b64         if has_image   else None,
             )
 
             is_sick = bool(prob >= 0.5)
+
+            # 🚨 التعديل الثاني: الفيتو الطبي (LLM & Clinical Override) 🚨
+            if not is_sick and has_tabular:
+                critical_flags = agent.get("critical_flags", [])
+                
+                hgb = standardized_data.get("HGB", 14.0)
+                wbc = standardized_data.get("WBC", 7.0)
+                plt = standardized_data.get("PLT", 250.0)
+                
+                is_clinically_sick = bool(
+                    critical_flags or 
+                    (hgb < 10.0 or hgb > 18.0) or  
+                    (wbc < 3.0 or wbc > 15.0) or   
+                    (plt < 100.0 or plt > 500.0)   
+                )
+
+                if is_clinically_sick:
+                    is_sick = True
+                    trace.append("⚠️ CLINICAL OVERRIDE: ML model predicted Healthy, but Rules detected critical values! Forced is_sick=True")
+
+            # 🚨 تعديل جديد: لو الموديل قال مريض بس مفيش داتا تحدد نوع المرض 🚨
+            if is_sick and not has_tabular:
+                agent["disease_type"] = "تشوهات خلوية (مكتشفة بالفحص المجهري)"
+                agent["severity_level"] = "يتطلب فحص CBC كامل لتحديد الخطورة"
+
+            # تسجيل القرار النهائي
             trace.append(f"Binary Classifier ({strategy}): Prob={prob:.4f}, is_sick={is_sick}")
 
             agent.update({

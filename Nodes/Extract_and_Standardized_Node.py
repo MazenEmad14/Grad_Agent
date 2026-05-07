@@ -196,7 +196,14 @@ class ExtractAndStandardizeNode:
             ocr_data, extracted_text = _run_ocr(inp["lab_report_image"])
 
         # ── 2. Master LLM ───────────────────────────────────────────────
-        manual_data = inp.get("manual_lab_data") or {}
+        manual_data = state["input_state"].get("manual_lab_data")
+        
+        # --- السطور الجديدة اللي هتحل المشكلة ---
+        if manual_data and isinstance(manual_data, dict):
+            agent["standardized_data"] = manual_data
+            # لو عايز توقف النود هنا لأن الداتا جاهزة أصلاً (Optional)
+            pass 
+        # ----------------------------------------
         llm_result  = _run_master_llm(ocr_data, manual_data)
 
         # ── 3. Extract results ──────────────────────────────────────────
