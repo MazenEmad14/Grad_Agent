@@ -92,14 +92,18 @@ def _validate_manual_lab_data(
 
 
 def _detect_input_type(has_smear: bool, has_lab_image: bool, has_manual: bool) -> str:
-    has_image = has_smear or has_lab_image
-
-    if has_image and has_manual:
+    # 1. لو عندنا صورة خلية + (ورقة تحليل أو أرقام يدوية) = دمج
+    if has_smear and (has_lab_image or has_manual):
         return "both"
-    if has_image:
+    
+    # 2. لو عندنا صورة خلية فقط (ومفيش أي ورق أو أرقام) = رؤية فقط
+    if has_smear and not (has_lab_image or has_manual):
         return "image_only"
-    if has_manual:
+        
+    # 3. لو عندنا ورقة تحليل أو أرقام يدوية (ومفيش صورة خلية) = أرقام فقط
+    if not has_smear and (has_lab_image or has_manual):
         return "data_only"
+        
     return "unknown"
 
 
