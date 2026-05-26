@@ -81,24 +81,6 @@ class ManualLabData(BaseModel):
     BASO_ABS: Optional[float] = Field(None, description="Basophils absolute ×10³/µL")
 
 
-class Base64DiagnoseRequest(BaseModel):
-    """Send pre-encoded images as base64 strings."""
-    blood_smear_image: Optional[str] = Field(
-        None,
-        description="Blood smear microscopy image encoded as base64 (data URI or raw base64).",
-    )
-    lab_report_image: Optional[str] = Field(
-        None,
-        description="Lab report scan encoded as base64.",
-    )
-    manual_lab_data: Optional[ManualLabData] = Field(
-        None,
-        description="Manually entered CBC values (overrides OCR when provided).",
-    )
-    session_id: Optional[str] = Field(None, description="Optional session identifier.")
-    user_id:    Optional[str] = Field(None, description="Optional user identifier.")
-
-
 class DiagnosisResponse(BaseModel):
     """Unified response schema for all diagnostic endpoints."""
     request_id:    str
@@ -129,15 +111,6 @@ class DiagnosisResponse(BaseModel):
 # ══════════════════════════════════════════════════════════════════
 #  Helper utilities
 # ══════════════════════════════════════════════════════════════════
-
-def _ensure_data_uri(b64: Optional[str]) -> Optional[str]:
-    """Guarantee the string is a proper data URI."""
-    if b64 is None:
-        return None
-    if b64.startswith("data:"):
-        return b64
-    return f"data:image/jpeg;base64,{b64}"
-
 
 def _file_to_base64(file_bytes: bytes, content_type: str = "image/jpeg") -> str:
     encoded = base64.b64encode(file_bytes).decode("utf-8")
@@ -206,10 +179,8 @@ def _build_response(agent: dict, request_id: str, elapsed_ms: float) -> Diagnosi
 # ══════════════════════════════════════════════════════════════════
 
 # ── Health check ──────────────────────────────────────────────────
-
 @app.get("/", tags=["Health"])
 async def root():
-    """API root — returns status info."""
     return {
         "service": "Hematology AI Diagnostic API",
         "version": "1.0.0",
@@ -220,72 +191,91 @@ async def root():
 
 @app.get("/health", tags=["Health"])
 async def health():
-    """Liveness probe."""
     return {"status": "ok", "engine_ready": engine is not None}
 
 
-# ── Diagnose via base64 ───────────────────────────────────────────
-
+# ── 1. Diagnose via Blood Smear Only (Vision) ─────────────────────
 @app.post(
-    "/diagnose/base64",
+    "/diagnose/blood-smear",
     response_model=DiagnosisResponse,
     status_code=status.HTTP_200_OK,
-    tags=["Diagnosis"],
-    summary="Diagnose using base64-encoded images",
+    tags=["Diagnosis Paths"],
+    summary="Path 1: Diagnose via Blood Smear Image Only",
 )
-async def diagnose_base64(payload: Base64DiagnoseRequest):
+async def diagnose_blood_smear(
+    blood_smear_image: UploadFile = File(..., description="صورة شريحة الدم المجهرية"),
+    session_id: Optional[str] = Form(None)
+):
     """
-    Submit blood-smear and/or lab-report images as **base64** strings,
-    along with optional manually entered CBC values.
-
-    At least one of `blood_smear_image`, `lab_report_image`, or
-    `manual_lab_data` must be provided.
+    استخدم هذه البوابة لرفع **صورة خلية الدم المجهرية** فقط.
+    سيتم توجيهها تلقائياً لموديل الرؤية الحاسوبية (Vision-Only).
     """
-    if not any([
-        payload.blood_smear_image,
-        payload.lab_report_image,
-        payload.manual_lab_data,
-    ]):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Provide at least one of: blood_smear_image, lab_report_image, manual_lab_data.",
-        )
-
-    request_id = str(uuid.uuid4())
-    t0 = time.perf_counter()
-
-    manual = payload.manual_lab_data.model_dump(exclude_none=True) if payload.manual_lab_data else None
-
+    data = await blood_smear_image.read()
+    smear_b64 = _file_to_base64(data, blood_smear_image.content_type or "image/jpeg")
+    
     initial_state = _build_initial_state(
-        blood_smear_b64=_ensure_data_uri(payload.blood_smear_image),
-        lab_report_b64=_ensure_data_uri(payload.lab_report_image),
-        manual_lab=manual,
-        session_id=payload.session_id,
-        user_id=payload.user_id,
+        blood_smear_b64=smear_b64, 
+        lab_report_b64=None, 
+        manual_lab=None, 
+        session_id=session_id
     )
-
+    
+    t0 = time.perf_counter()
     try:
         agent = _run_pipeline(initial_state)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Pipeline error: {str(exc)}")
+        
+    return _build_response(agent, str(uuid.uuid4()), (time.perf_counter() - t0) * 1000)
 
-    elapsed = (time.perf_counter() - t0) * 1000
-    return _build_response(agent, request_id, elapsed)
 
-
-# ── Diagnose via file upload ──────────────────────────────────────
-
+# ── 2. Diagnose via Lab Report Only (OCR & Tabular) ───────────────
 @app.post(
-    "/diagnose/upload",
+    "/diagnose/lab-report",
     response_model=DiagnosisResponse,
     status_code=status.HTTP_200_OK,
-    tags=["Diagnosis"],
-    summary="Diagnose using multipart file upload",
+    tags=["Diagnosis Paths"],
+    summary="Path 2: Diagnose via Lab Report Image Only",
 )
-async def diagnose_upload(
-    blood_smear_image: Optional[UploadFile] = File(None,  description="Blood smear microscopy image file."),
-    lab_report_image:  Optional[UploadFile] = File(None,  description="Lab report scan image file."),
-    # Manual CBC values as form fields
+async def diagnose_lab_report(
+    lab_report_image: UploadFile = File(..., description="صورة تقرير المعمل (الورقة)"),
+    session_id: Optional[str] = Form(None)
+):
+    """
+    استخدم هذه البوابة لرفع **صورة ورقة تحليل الـ CBC** فقط.
+    سيتم قراءة الأرقام (OCR) وتوجيهها لموديل البيانات المجدولة (Tabular-Only).
+    """
+    data = await lab_report_image.read()
+    report_b64 = _file_to_base64(data, lab_report_image.content_type or "image/jpeg")
+    
+    initial_state = _build_initial_state(
+        blood_smear_b64=None, 
+        lab_report_b64=report_b64, 
+        manual_lab=None, 
+        session_id=session_id
+    )
+    
+    t0 = time.perf_counter()
+    try:
+        agent = _run_pipeline(initial_state)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Pipeline error: {str(exc)}")
+        
+    return _build_response(agent, str(uuid.uuid4()), (time.perf_counter() - t0) * 1000)
+
+
+# ── 3. Diagnose via Fusion  ──────────────────────────
+@app.post(
+    "/diagnose/fusion",
+    response_model=DiagnosisResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Diagnosis Paths"],
+    summary="Path 3: Full Fusion (Smear Image + Lab Report Image OR Manual Values)",
+)
+async def diagnose_fusion(
+    blood_smear_image: UploadFile = File(..., description="صورة شريحة الدم المجهرية (إلزامية)"),
+    lab_report_image: Optional[UploadFile] = File(None, description="صورة ورقة تحليل المعمل (اختيارية لو هتدخل القيم يدوياً)"),
+    # إتاحة إدخال القيم يدوياً كـ Form Fields في نفس الوقت
     HGB:      Optional[float] = Form(None),
     WBC:      Optional[float] = Form(None),
     PLT:      Optional[float] = Form(None),
@@ -299,16 +289,13 @@ async def diagnose_upload(
     MONO_ABS: Optional[float] = Form(None),
     EOS_ABS:  Optional[float] = Form(None),
     BASO_ABS: Optional[float] = Form(None),
-    session_id: Optional[str] = Form(None),
-    user_id:    Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None)
 ):
     """
-    Submit images as **multipart/form-data** file uploads.
-    CBC lab values can also be passed as optional form fields.
-
-    At least one image or one lab value is required.
+    بوابة الدمج الكامل:
+    يجب رفع صورة خلية الدم، ومعها إما (صورة ورقة التحليل ليقرأها الذكاء الاصطناعي) أو (كتابة أرقام التحاليل يدوياً).
     """
-    # Collect manual lab values
+    # 1. تجميع البيانات اليدوية لو موجودة
     manual_raw = {
         k: v for k, v in {
             "HGB": HGB, "WBC": WBC, "PLT": PLT, "RBC": RBC,
@@ -319,57 +306,51 @@ async def diagnose_upload(
     }
     manual = manual_raw if manual_raw else None
 
-    if blood_smear_image is None and lab_report_image is None and not manual:
+    # صمام أمان: التأكد إن المستخدم بعت يا إما صورة تحليل يا إما قيم يدوية مع صورة الخلية
+    if lab_report_image is None and not manual:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Upload at least one image or supply lab values.",
+            detail="لإتمام عملية الدمج (Fusion)، يجب رفع صورة ورقة التحليل أو إدخال قيم CBC يدوياً مع صورة الخلية.",
         )
 
-    request_id = str(uuid.uuid4())
     t0 = time.perf_counter()
 
-    # Convert uploaded files to base64
-    smear_b64 = None
-    if blood_smear_image:
-        data = await blood_smear_image.read()
-        smear_b64 = _file_to_base64(data, blood_smear_image.content_type or "image/jpeg")
+    # 2. تحويل صورة الخلية لـ Base64
+    smear_data = await blood_smear_image.read()
+    smear_b64 = _file_to_base64(smear_data, blood_smear_image.content_type or "image/jpeg")
 
+    # 3. تحويل صورة التحليل لـ Base64 لو موجودة
     report_b64 = None
     if lab_report_image:
-        data = await lab_report_image.read()
-        report_b64 = _file_to_base64(data, lab_report_image.content_type or "image/jpeg")
+        report_data = await lab_report_image.read()
+        report_b64 = _file_to_base64(report_data, lab_report_image.content_type or "image/jpeg")
 
+    # 4. بناء الـ Initial State وضخ البيانات للجراف
     initial_state = _build_initial_state(
-        blood_smear_b64=smear_b64,
-        lab_report_b64=report_b64,
-        manual_lab=manual,
-        session_id=session_id,
-        user_id=user_id,
+        blood_smear_b64=smear_b64, 
+        lab_report_b64=report_b64, 
+        manual_lab=manual, 
+        session_id=session_id
     )
-
+    
     try:
         agent = _run_pipeline(initial_state)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Pipeline error: {str(exc)}")
+        
+    return _build_response(agent, str(uuid.uuid4()), (time.perf_counter() - t0) * 1000)
 
-    elapsed = (time.perf_counter() - t0) * 1000
-    return _build_response(agent, request_id, elapsed)
-
-
-# ── Diagnose with manual lab data only ───────────────────────────
-
+# ── 4. Diagnose with manual lab data only (Fallback) ───────────────
 @app.post(
     "/diagnose/manual",
     response_model=DiagnosisResponse,
     status_code=status.HTTP_200_OK,
-    tags=["Diagnosis"],
-    summary="Diagnose using manually entered CBC lab values only",
+    tags=["Diagnosis Paths"],
+    summary="Path 4: Diagnose using manual CBC values",
 )
 async def diagnose_manual(lab_data: ManualLabData):
     """
-    Submit **only structured CBC lab values** (no images required).
-
-    Useful when there is no image available but lab results are known.
+    Submit **only structured CBC lab values** manually (no images required).
     """
     values = lab_data.model_dump(exclude_none=True)
     if not values:
@@ -392,8 +373,7 @@ async def diagnose_manual(lab_data: ManualLabData):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Pipeline error: {str(exc)}")
 
-    elapsed = (time.perf_counter() - t0) * 1000
-    return _build_response(agent, request_id, elapsed)
+    return _build_response(agent, request_id, (time.perf_counter() - t0) * 1000)
 
 
 # ══════════════════════════════════════════════════════════════════
